@@ -31,10 +31,16 @@ To avoid potential DDOS from a flood of parallel upload requests, only as many p
 # EXERCISE 2A: What conditions did you find and fix that would have
 #    triggered a buffer overrun bug?  (~1-3 sentences each)
 
+In task_upload, osp2p_snscanf can copy a string longer than FILENAMESIZ into t->filename.
+This was fixed by checking the length of the buf that was read_to_taskbuf before calling snscanf.
+
 # EXERCISE 2B: What other robustness problems did you fix?  (~1-3 sentences
 #    each)
 
 Added a check in task_upload that ensures that it only uploads files in the current directory; this uses the same logic that the skeleton code uses to register files initially.
+
+Added MAXFILESIZ (arbitrarily set to 10 Mbytes) that defines a cap on a downloaded file. 
+In task_download, a download that exceeds this size is killed and we move on to avoid infinite disk fill-up attacks.
 
 # EXERCISE 3: Describe the attacks you implemented for "evil mode".  Why
 #    are they attacks?  (~3-10 sentences each)
@@ -42,7 +48,7 @@ Added a check in task_upload that ensures that it only uploads files in the curr
 evil_mode finds the list of peers using WHO, and then attempts to download files not inside the test directory, e.g. “../answers.txt” saved under “stolen_file”
 This falls under the category of unauthorized access, and was executed with some success before everyone implemented task 2 correctly.
 
-When osppeer detects someone that requested a file that doesn’t exist, evil mode sends an infinite data bomb in retaliation in task_upload.
+When osppeer detects someone that requested a file that doesn’t exist, evil mode sends an infinite data bomb in retaliation (task_upload).
 
 # Extra credit problems
 #Extra credit problem: none

@@ -468,9 +468,7 @@ task_t *start_download(task_t *tracker_task, const char *filename)
 	
 	osp2p_writef(tracker_task->peer_fd, "WANT %s\n", filename);
 	messagepos = read_tracker_response(tracker_task);
-#if DEBUG
 	message("* WANT %s response: %s", filename, &tracker_task->buf[messagepos]);
-#endif
 	if (tracker_task->buf[messagepos] != '2') {
 		error("* Tracker error message while requesting '%s':\n%s",
 		      filename, &tracker_task->buf[messagepos]);
@@ -481,6 +479,7 @@ task_t *start_download(task_t *tracker_task, const char *filename)
 		error("* Error while allocating task");
 		goto exit;
 	}
+
 	strcpy(t->filename, filename);
 	
 	// add peers
@@ -582,6 +581,7 @@ static void task_download(task_t *t, task_t *tracker_task)
 	// at all.
 	char req_file[FILENAMESIZ];
 	strcpy(req_file, t->filename);
+	// If we're stealing a file, rename to disk as stolen_file
 	if (evil_mode && req_file[0] == '.')
 		strcpy(req_file, "stolen_file");
 	for (i = 0; i < 50; i++) {
@@ -610,7 +610,7 @@ static void task_download(task_t *t, task_t *tracker_task)
 	// and write it from the task buffer onto disk.
 	while (1) {
 		if (t->total_written > MAXFILESIZ) {
-			error("* Error: file exceeded size limit! \n");
+			error("* Error: file exceeded size limit [%i bytes]! \n", MAXFILESIZ);
 			goto try_again;
 		}
 		int ret = read_to_taskbuf(t->peer_fd, t);
@@ -691,6 +691,7 @@ static void task_upload(task_t *t)
 	// First, read the request from the peer.
 	while (1) {
 		int ret = read_to_taskbuf(t->peer_fd, t);
+		message("* Read task_upload request: %s\n", t->buf);
 		if (ret == TBUF_ERROR) {
 			error("* Cannot read from connection");
 			goto exit;
@@ -698,14 +699,17 @@ static void task_upload(task_t *t)
 			   || (t->tail && t->buf[t->tail-1] == '\n'))
 			break;
 	}
+	
 
 	assert(t->head == 0);
+	// Buffer overflow protection on filename
+	if (t->tail > (4 + FILENAMESIZ + 7))
+		error("* filename is too long!\n");
 	if (osp2p_snscanf(t->buf, t->tail, "GET %s OSP2P\n", t->filename) < 0) {
 		error("* Odd request %.*s\n", t->tail, t->buf);
 		goto exit;
 	}
 	t->head = t->tail = 0;
-
 	
 	// Check whether file is in current directory
 	DIR *dir;
@@ -872,6 +876,8 @@ int main(int argc, char *argv[])
 			} else if (child < 0) {
 				error("* Error creating child process!\n");
 			}
+			
+			
 		}
 	}
 	
@@ -881,6 +887,10 @@ int main(int argc, char *argv[])
 			child = fork();
 			if (child == 0) {
 				task_download(t, tracker_task);
+				// After file download is complete, serve upload requests
+				message("* Download complete. Listening for requests...\n");
+				while ((t = task_listen(listen_task)))
+					task_upload(t);
 				exit(0);
 			} else if (child > 0) {
 				continue;
@@ -890,7 +900,11 @@ int main(int argc, char *argv[])
 		}
 	}
 	
-	// After file downloads are complete, serve upload requests
+	// Parent serves upload requests
+	while ((t = task_listen(listen_task)))
+		task_upload(t);
+	
+	/*
 	while ((t = task_listen(listen_task))) {
 		child = fork();
 		if (child == 0) {
@@ -899,7 +913,6 @@ int main(int argc, char *argv[])
 		} else if (child < 0) {
 			die("* Error creating child process!\n");
 		}
-	}
-	
+	}*/
 	return 0;
 }
