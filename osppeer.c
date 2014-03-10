@@ -480,6 +480,10 @@ task_t *start_download(task_t *tracker_task, const char *filename)
 		goto exit;
 	}
 
+	if (strlen(filename) > FILENAMESIZ) {
+		error("* filename %s is too long!\n", filename);
+		goto exit;
+	}
 	strcpy(t->filename, filename);
 	
 	// add peers
@@ -610,7 +614,7 @@ static void task_download(task_t *t, task_t *tracker_task)
 	// and write it from the task buffer onto disk.
 	while (1) {
 		if (t->total_written > MAXFILESIZ) {
-			error("* Error: file exceeded size limit [%i bytes]! \n", MAXFILESIZ);
+			error("* Error: file [%s] exceeded size limit [%i bytes]! \n", t->filename, MAXFILESIZ);
 			goto try_again;
 		}
 		int ret = read_to_taskbuf(t->peer_fd, t);
@@ -642,7 +646,7 @@ static void task_download(task_t *t, task_t *tracker_task)
 		task_free(t);
 		return;
 	}
-	error("* Download was empty, trying next peer\n");
+	error("* Download [%s] was empty, trying next peer\n", t->filename);
 
     try_again:
 	if (t->disk_filename[0])
