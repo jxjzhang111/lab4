@@ -39,7 +39,7 @@ static int listen_port;
 
 #define TASKBUFSIZ	4096	// Size of task_t::buf
 #define FILENAMESIZ	256		// Size of task_t::filename
-#define MAXFILESIZ 131072		// Max size of file, 128 MB
+#define MAXFILESIZ 10485760	// Max size of file, 10 MB
 
 typedef enum tasktype {		// Which type of connection is this?
 	TASK_TRACKER,		// => Tracker connection
@@ -881,21 +881,25 @@ int main(int argc, char *argv[])
 			child = fork();
 			if (child == 0) {
 				task_download(t, tracker_task);
-				// After file download is complete, serve upload requests
-				message("* Download complete. Listening for requests...\n");
-				while ((t = task_listen(listen_task)))
-					task_upload(t);
 				exit(0);
 			} else if (child > 0) {
 				continue;
 			} else {
-				error("* Error creating child process!\n");
+				die("* Error creating child process!\n");
 			}
 		}
 	}
 	
-	while ((t = task_listen(listen_task)))
-		task_upload(t);
+	// After file downloads are complete, serve upload requests
+	while ((t = task_listen(listen_task))) {
+		child = fork();
+		if (child == 0) {
+			task_upload(t);
+			exit(0);
+		} else if (child < 0) {
+			die("* Error creating child process!\n");
+		}
+	}
 	
 	return 0;
 }

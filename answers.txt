@@ -40,9 +40,9 @@ Added a check in task_upload that ensures that it only uploads files in the curr
 #    are they attacks?  (~3-10 sentences each)
 
 evil_mode finds the list of peers using WHO, and then attempts to download files not inside the test directory, e.g. “../answers.txt” saved under “stolen_file”
-This falls under the category of unauthorized access, and was executed with some success before everyone implemented task 2 fully.
+This falls under the category of unauthorized access, and was executed with some success before everyone implemented task 2 correctly.
 
-When osppeer detects someone that requested a file that doesn’t exist, evil mode sends an infinite data bomb in retaliation.
+When osppeer detects someone that requested a file that doesn’t exist, evil mode sends an infinite data bomb in retaliation in task_upload.
 
 # Extra credit problems
 #Extra credit problem: none
