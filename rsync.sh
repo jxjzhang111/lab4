@@ -1,0 +1,1 @@
+rsync -tv * xinjia@grad.seas.ucla.edu:~/CS111/Lab4/

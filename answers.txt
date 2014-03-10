@@ -1,0 +1,50 @@
+# Fill in your name, student ID, and email address in this file.
+# If you are working in a team, fill out the information for both team 
+# members.
+
+# SUBMIT THE LAB ONLY ONCE (from only one partner). This file will be
+# automatically parsed in order to give both team members credit for the
+# lab.
+
+# You need to fill in the EXERCISE sections describing your solutions
+# for Tasks 1, 2, and 3, as well as write the corresponding code.
+# If you did one or more extra credit problems, indicate which one in the
+# appropriate section below (remove the # sign first). If you have any other
+# information you'd like us to know, please add it at the end of the file.
+
+# Partner 1
+Name: Jennifer Zhang
+Student ID: 504356174
+Email: jxjzhang@cs.ucla.edu
+
+# Partner 2 (if you're working in a team)
+# Name: Yi-An Lai
+# Student ID: 304271741
+# Email: lai61616@ucla.edu
+
+# EXERCISE 1: What method you used to make your peer download and upload
+#    files in parallel?  (~1-3 sentences)
+Used fork() to download and upload the any single requested file in parallel.
+To avoid potential DDOS from a flood of parallel upload requests, only as many processes exist as requested files, e.g. for cat1/cat2/cat3, three child processes exist that each download and serve one upload at a time in parallel.
+
+
+# EXERCISE 2A: What conditions did you find and fix that would have
+#    triggered a buffer overrun bug?  (~1-3 sentences each)
+
+# EXERCISE 2B: What other robustness problems did you fix?  (~1-3 sentences
+#    each)
+
+Added a check in task_upload that ensures that it only uploads files in the current directory; this uses the same logic that the skeleton code uses to register files initially.
+
+# EXERCISE 3: Describe the attacks you implemented for "evil mode".  Why
+#    are they attacks?  (~3-10 sentences each)
+
+evil_mode finds the list of peers using WHO, and then attempts to download files not inside the test directory, e.g. “../answers.txt” saved under “stolen_file”
+This falls under the category of unauthorized access, and was executed with some success before everyone implemented task 2 fully.
+
+When osppeer detects someone that requested a file that doesn’t exist, evil mode sends an infinite data bomb in retaliation.
+
+# Extra credit problems
+#Extra credit problem: none
+
+# Add any other information you'd like us to know below this line.
