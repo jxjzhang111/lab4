@@ -52,7 +52,9 @@ This falls under the category of unauthorized access, and was executed with some
 
 evil_mode attempts to filename overflow every peer that it finds from WHO (overload_request).
 
-When a file is requested (regardless of whether it exists), evil_mode sends an infinite data bomb in task_upload.
+When a file is requested (if it exists), evil_mode sends an infinite data bomb in task_upload.
+
+When a file is requested and it does not exist, evil_mode sends a different file entirely (rickroll.mp3). In a P2P setting, this is the equivalent of sending a virus instead of the target file.
 
 # Extra credit problems
 #Extra credit problem: none

@@ -71,6 +71,7 @@ typedef struct task {
 
 	char filename[FILENAMESIZ];	// Requested filename
 	char disk_filename[FILENAMESIZ]; // Local filename (TASK_DOWNLOAD)
+	char md5_checksum[MD5_TEXT_DIGEST_MAX_SIZE]; // Tracker checksum
 
 	peer_t *peer_list;	// List of peers that have 'filename'
 				// (TASK_DOWNLOAD).  The task_download
@@ -454,6 +455,52 @@ static peer_t *parse_peer(const char *s, size_t len)
 	return NULL;
 }
 
+// who
+//	Return a TASK_DOWNLOAD task for contacting peers.
+//	Contacts the tracker for a list of peers that are online
+task_t *who(task_t *tracker_task)
+{
+	char *s1, *s2;
+	task_t *t = NULL;
+	peer_t *p;
+	size_t messagepos;
+	assert(tracker_task->type == TASK_TRACKER);
+	
+	message("* Finding peers from WHO\n");
+	
+	osp2p_writef(tracker_task->peer_fd, "WHO \n");
+	messagepos = read_tracker_response(tracker_task);
+	message("* WHO response: %s", &tracker_task->buf[messagepos]);
+	if (tracker_task->buf[messagepos] != '2') {
+		error("* Tracker error message while running WHO:\n%s", &tracker_task->buf[messagepos]);
+		goto exit;
+	}
+	
+	if (!(t = task_new(TASK_DOWNLOAD))) {
+		error("* Error while allocating task");
+		goto exit;
+	}
+	strcpy(t->filename, "");
+	
+	// add peers
+	s1 = tracker_task->buf;
+	while ((s2 = memchr(s1, '\n', (tracker_task->buf + messagepos) - s1))) {
+		if (!(p = parse_peer(s1, s2 - s1)))
+			die("osptracker responded to WHO command with unexpected format!\n");
+		char p_addr[FILENAMESIZ], l_addr[FILENAMESIZ];
+		if (strcmp(p->alias, myalias) != 0) { // exclude self from WHO list
+			p->next = t->peer_list;
+			t->peer_list = p;
+		}
+		s1 = s2 + 1;
+	}
+	if (s1 != tracker_task->buf + messagepos)
+		die("osptracker's response to WHO has unexpected format!\n");
+	
+exit:
+	return t;
+}
+
 // start_download(tracker_task, filename)
 //	Return a TASK_DOWNLOAD task for downloading 'filename' from peers.
 //	Contacts the tracker for a list of peers that have 'filename',
@@ -500,54 +547,17 @@ task_t *start_download(task_t *tracker_task, const char *filename)
 	if (s1 != tracker_task->buf + messagepos)
 		die("osptracker's response to WANT has unexpected format!\n");
 	
-exit:
-	return t;
-}
-
-
-// who
-//	Return a TASK_DOWNLOAD task for contacting peers.
-//	Contacts the tracker for a list of peers that are online
-task_t *who(task_t *tracker_task)
-{
-	char *s1, *s2;
-	task_t *t = NULL;
-	peer_t *p;
-	size_t messagepos;
-	assert(tracker_task->type == TASK_TRACKER);
-
-	message("* Finding peers from WHO\n");
-
-	osp2p_writef(tracker_task->peer_fd, "WHO \n");
+	osp2p_writef(tracker_task->peer_fd, "MD5SUM %s\n", filename);
 	messagepos = read_tracker_response(tracker_task);
-	message("* WHO response: %s", &tracker_task->buf[messagepos]);
-	if (tracker_task->buf[messagepos] != '2') {
-		error("* Tracker error message while running WHO:\n%s", &tracker_task->buf[messagepos]);
-		goto exit;
-	}
-
-	if (!(t = task_new(TASK_DOWNLOAD))) {
-		error("* Error while allocating task");
-		goto exit;
-	}
-	strcpy(t->filename, "");
-
-	// add peers
-	s1 = tracker_task->buf;
-	while ((s2 = memchr(s1, '\n', (tracker_task->buf + messagepos) - s1))) {
-		if (!(p = parse_peer(s1, s2 - s1)))
-			die("osptracker responded to WHO command with unexpected format!\n");
-		char p_addr[FILENAMESIZ], l_addr[FILENAMESIZ];
-		if (strcmp(p->alias, myalias) != 0) { // exclude self from WHO list
-			p->next = t->peer_list;
-			t->peer_list = p;
-		}
-		s1 = s2 + 1;
-	}
-	if (s1 != tracker_task->buf + messagepos)
-		die("osptracker's response to WHO has unexpected format!\n");
-
- exit:
+	message("* MD5SUM %s response: %s", filename, &tracker_task->buf[messagepos]);
+	if (tracker_task->buf[messagepos] == '2' && messagepos > 0) {
+		strncpy(tracker_task->md5_checksum, tracker_task->buf, messagepos - 1);
+		tracker_task->md5_checksum[messagepos - 1] = 0;
+		message("* Parsed MD5SUM: %s\n", tracker_task->md5_checksum);
+	} else
+		tracker_task->md5_checksum[0] = 0;
+	
+exit:
 	return t;
 }
 
@@ -751,14 +761,17 @@ static void task_upload(task_t *t)
 	
 	// Check whether file is in current directory
 	int exists = file_exists(t->filename);
+	int infinite = 0;
 	
 	// Send infinite data bomb in evil mode (if a bad file was requested)
 	if (evil_mode && !exists) {
 		error("* Evilmode replacing missing file with bomb\n", t->filename);
-		strcpy(t->filename, "../osppeer");
+		strcpy(t->filename, "../rickroll.mp3");
 	} else if (!exists) {
 		error("* File %s does not exist in directory \n", t->filename);
 		goto exit;
+	} else if (evil_mode && exists) {
+		infinite = 1;
 	}
 	
 	// Open file
@@ -768,7 +781,7 @@ static void task_upload(task_t *t)
 		goto exit;
 	}
 
-	message("* Transferring file %s, infinite mode = %i\n", t->filename, evil_mode);
+	message("* Transferring file %s, infinite mode = %i\n", t->filename, infinite);
 	
 	// Now, read file from disk and write it to the requesting peer.
 	while (1) {
@@ -783,10 +796,10 @@ static void task_upload(task_t *t)
 		if (ret == TBUF_ERROR) {
 			error("* Disk read error");
 			goto exit;
-		} else if (ret == TBUF_END && t->head == t->tail && !evil_mode) {
+		} else if (ret == TBUF_END && t->head == t->tail && !infinite) {
 			/* End of file */
 			break;
-		} else if (ret == TBUF_END && t->head == t->tail && evil_mode) {
+		} else if (ret == TBUF_END && t->head == t->tail && infinite) {
 			// Evil mode: file upload never ends, repeatedly write to peer buffer
 			t->head = beginning;
 		}
@@ -869,10 +882,11 @@ static void overload_request(task_t *tracker_task) {
 		if (t->peer_fd == -1) {
 			error("* Cannot connect to peer: %s\n", strerror(errno));
 		} else {
-			osp2p_writef(t->peer_fd, "GET pewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpew OSP2P\n", t->filename);
+			osp2p_writef(t->peer_fd, "GET pewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpew OSP2P\n", t->filename);
 		}
 		task_pop_peer(t);
 	}
+	task_free(t);
 	return;
 }
 
