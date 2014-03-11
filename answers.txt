@@ -36,6 +36,10 @@ This was fixed by checking the length of the buf that was read_to_taskbuf before
 
 In start_download, there is an unprotected call to strcpy on the filename requested for download. Even though this is primarily a precaution against a command line argument, a strlen check is made here.
 
+When calling read_tracker_response, it only reads the first 4096 bytes of data from the tracker, which is insufficient for the popular tracker (too many peers). Dynamically reallocate the size of the buf when it detects that that overflow occurs. Caveat: since the entire response from the tracker is read into memory, it may cause memory overflow if there are vast numbers of peers.
+
+parse_peer uses snscanf without checking for the length of the peer string; added a check for this. However, this is unlikely to occur because the length of a telnet request is limited in length when sending an ADDR request.
+
 # EXERCISE 2B: What other robustness problems did you fix?  (~1-3 sentences
 #    each)
 
@@ -52,11 +56,17 @@ This falls under the category of unauthorized access, and was executed with some
 
 evil_mode attempts to filename overflow every peer that it finds from WHO (overload_request).
 
-When a file is requested (if it exists), evil_mode sends an infinite data bomb in task_upload.
+When a file is requested (if does exist), task_upload either sends an infinite data bomb or the wrong file.
 
 When a file is requested and it does not exist, evil_mode sends a different file entirely (rickroll.mp3). In a P2P setting, this is the equivalent of sending a virus instead of the target file.
 
+In register_files, evil mode registers files regardless of whether if passes the md5 checksum to propagate corrupt files in the tracker for users that didn’t implement md5 checking.
+
 # Extra credit problems
-#Extra credit problem: none
+#Extra credit problem: MD5
+
+Added md5_digest function that calculates and returns the MD5 checksum.
+Tracker reported MD5 checksum is stored in the task struct, and parsed in start_download.
+task_download calculates the MD5 checksum of the file received, and crosschecks against the tracker’s checksum; if there is a mismatch, it tries to download again vs a different peer. Registering the file with HAVE includes the checksum, both in task_download and register_files. 
 
 # Add any other information you'd like us to know below this line.
