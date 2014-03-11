@@ -25,8 +25,8 @@ Email: jxjzhang@cs.ucla.edu
 # EXERCISE 1: What method you used to make your peer download and upload
 #    files in parallel?  (~1-3 sentences)
 Used fork() to download and upload the any single requested file in parallel.
-To avoid potential DDOS from a flood of parallel upload requests, only as many processes exist as requested files, e.g. for cat1/cat2/cat3, three child processes exist that each download and serve one upload at a time in parallel.
-
+Created a new function upload_files that makes use of select() and fork() to upload.
+(Sidenote: Calling fork() after task_listen had mixed results; other peers were able to download hosted files, but run-good bot peers responded with empty file errors.)
 
 # EXERCISE 2A: What conditions did you find and fix that would have
 #    triggered a buffer overrun bug?  (~1-3 sentences each)
@@ -50,7 +50,7 @@ In task_download, a download that exceeds this size is killed and we move on to 
 evil_mode finds the list of peers using WHO, and then attempts to download files not inside the test directory, e.g. “../answers.txt” saved under “stolen_file”
 This falls under the category of unauthorized access, and was executed with some success before everyone implemented task 2 correctly.
 
-When osppeer detects someone that requested a file that doesn’t exist, evil mode sends an infinite data bomb in retaliation (task_upload).
+When a file is requested (regardless of whether it exists), evil mode sends an infinite data bomb in task_upload.
 
 # Extra credit problems
 #Extra credit problem: none
