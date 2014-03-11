@@ -1060,6 +1060,7 @@ int main(int argc, char *argv[])
 	register_files(tracker_task, myalias);
 	
 	// First, download files named on command line.
+	// TODO: retry after set time period if download fails
 	for (; argc > 1; argc--, argv++) {
 		if ((t = start_download(tracker_task, argv[1]))) {
 			child = fork();
