@@ -42,12 +42,21 @@ const char *myalias;
 #define FILENAMESIZ	256		// Size of task_t::filename
 #define MAXFILESIZ 10485760	// Max size of file, 10 MB
 
+#define DOWNLOAD_RETRY 3    // time interval between download retries (sec.)
+#define MAX_RETRY 3         // number of times to retry download
+
 typedef enum tasktype {		// Which type of connection is this?
 	TASK_TRACKER,		// => Tracker connection
 	TASK_PEER_LISTEN,	// => Listens for upload requests
 	TASK_UPLOAD,		// => Upload request (from peer to us)
 	TASK_DOWNLOAD		// => Download request (from us to peer)
 } tasktype_t;
+
+typedef enum dl_status {       // Did the download task went well?
+	DOWNLOAD_COMPLETE,         // => Download complete & success
+	DOWNLOAD_NO_PEER,          // => No peer's willing to serve file
+	DOWNLOAD_TOO_MANY_LOCAL    // => Too many local files with the same name
+} dl_status_t;
 
 typedef struct peer {		// A peer connection (TASK_DOWNLOAD)
 	char alias[TASKBUFSIZ];	// => Peer's alias
@@ -402,35 +411,30 @@ task_t *start_listen(void)
 
 //	Calculate MD5sum
 static char *md5_digest(const char *filename) {
-	md5_byte_t *data = NULL;
 	md5_state_t *state = (md5_state_t *) malloc(sizeof(md5_state_t));
 	char *text_digest = (char *) malloc(sizeof(char) * (MD5_TEXT_DIGEST_MAX_SIZE + 1));
-	
+	md5_byte_t buf[1024];
+
 	// Find file size
 	FILE *file;
 	file = fopen(filename, "r");
-	fseek(file, 0, SEEK_END);
-	int nbytes = ftell(file);
-		
-	// Read file into memory
-	// TODO: Chunk this instead of reading everything into memory at once
-	data = (md5_byte_t *) malloc(sizeof(md5_byte_t) * nbytes);
-	fseek(file, 0, SEEK_SET);
-	file = fopen(filename, "r");
-	size_t r = fread((void *) data, 1, nbytes, file);
-	if ((int) r != nbytes)
-		error("* fread %zu instead of %i bytes\n", r, nbytes);
-	fclose(file);
-
-	// append data
+	int bytes_read = 0;
+	
 	md5_init(state);
-	md5_append(state, data, nbytes);
+
+	// Read file into memory
+	// FIXED: Chunk this instead of reading everything into memory at once
+	while(( bytes_read = fread (buf, 1, 1024, file)) > 0) {
+		// append data
+    	md5_append(state, buf, bytes_read);	   
+    }
+	fclose(file);
+	
 	int p = md5_finish_text(state, text_digest, 1);
 	text_digest[p] = 0;
 	
 	// cleanup
 	free(state);
-	free(data);
 	return text_digest;
 }
 
@@ -631,7 +635,7 @@ exit:
 //	directory.  't' was created by start_download().
 //	Starts with the first peer on 't's peer list, then tries all peers
 //	until a download is successful.
-static void task_download(task_t *t, task_t *tracker_task)
+static int task_download(task_t *t, task_t *tracker_task)
 {
 	int i, ret = -1;
 	assert((!t || t->type == TASK_DOWNLOAD)
@@ -642,7 +646,7 @@ static void task_download(task_t *t, task_t *tracker_task)
 		error("* No peers are willing to serve '%s'\n",
 		      (t ? t->filename : "that file"));
 		task_free(t);
-		return;
+		return DOWNLOAD_NO_PEER;
 	} else if (t->peer_list->addr.s_addr == listen_addr.s_addr
 		   && t->peer_list->port == listen_port)
 		goto try_again;
@@ -686,7 +690,7 @@ static void task_download(task_t *t, task_t *tracker_task)
 		error("* Too many local files like '%s' exist already.\n\
 * Try 'rm %s.~*~' to remove them.\n", t->filename, t->filename);
 		task_free(t);
-		return;
+		return DOWNLOAD_TOO_MANY_LOCAL;
 	}
 
 	// Read the file into the task buffer from the peer,
@@ -740,7 +744,7 @@ static void task_download(task_t *t, task_t *tracker_task)
 			(void) read_tracker_response(tracker_task);
 		}
 		task_free(t);
-		return;
+		return DOWNLOAD_COMPLETE;
 	}
 	error("* Download '%s' was empty, trying next peer\n", t->filename);
 
@@ -749,7 +753,7 @@ static void task_download(task_t *t, task_t *tracker_task)
 		unlink(t->disk_filename);
 	// recursive call
 	task_pop_peer(t);
-	task_download(t, tracker_task);
+	return task_download(t, tracker_task);
 }
 
 
@@ -973,6 +977,17 @@ static void overload_request(task_t *tracker_task) {
 	return;
 }
 
+static void spam_md5(task_t *tracker_task) {
+	message("* Spam tacker with filenames and md5 values\n");
+
+	osp2p_writef(tracker_task->peer_fd, "HAVE %s %s\n",
+			     "spam", "Q3mAe3djcNCDKaXVj3AF7c");
+	
+	(void) read_tracker_response(tracker_task);
+
+	return;
+}
+
 // main(argc, argv)
 //	The main loop!
 int main(int argc, char *argv[])
@@ -1060,12 +1075,20 @@ int main(int argc, char *argv[])
 	register_files(tracker_task, myalias);
 	
 	// First, download files named on command line.
-	// TODO: retry after set time period if download fails
+	// FIXED: retry after set time period if download fails
 	for (; argc > 1; argc--, argv++) {
 		if ((t = start_download(tracker_task, argv[1]))) {
+			char filename[FILENAMESIZ] = {'\0'};
+			strncpy(filename, argv[1], FILENAMESIZ);
 			child = fork();
 			if (child == 0) {
-				task_download(t, tracker_task);
+				int retry = 0;
+				while(task_download(t, tracker_task) > 0 
+				      && retry < DOWNLOAD_RETRY) {
+					sleep(DOWNLOAD_RETRY);
+					t = start_download(tracker_task, filename);
+					retry++;
+				}
 				exit(0);
 			} else if (child > 0) {
 				continue;
@@ -1086,6 +1109,7 @@ int main(int argc, char *argv[])
 		overload_request(tracker_task);
 		
 		// TODO: spam bad md5sum values to tracker
+		spam_md5(tracker_task);
 	}
 	
 	// Parent serves upload requests
