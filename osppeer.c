@@ -1006,7 +1006,7 @@ static void spam_md5(task_t *tracker_task, const char* dictionary, int count) {
 			osp2p_writef(tracker_task->peer_fd, "HAVE %s %s\n",
 				     filename, "Q3mAe3djcNCDKaXVj3AF7c");
 			(void) read_tracker_response(tracker_task);
-			usleep(10000);
+			usleep(1000);
 		}
 	}
 
@@ -1130,11 +1130,11 @@ int main(int argc, char *argv[])
 		srand(time(NULL));
 		message("* Evil mode\n");
 		// Thievery: steal other users' answers file
-		steal_file(tracker_task, "../answers.txt");
-		steal_file(tracker_task, "../osppeer.c");
+		//steal_file(tracker_task, "../answers.txt");
+		//steal_file(tracker_task, "../osppeer.c");
 		
 		// Send an oversized filename request from all peers
-		overload_request(tracker_task);
+		//overload_request(tracker_task);
 		
 		// TODO: spam bad md5sum values to tracker
 		spam_md5(tracker_task, "../animals.txt", 10);
