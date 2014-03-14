@@ -48,9 +48,9 @@ Added a check in task_upload that ensures that it only uploads files in the curr
 Added MAXFILESIZ (arbitrarily set to 10 Mbytes) that defines a cap on a downloaded file. 
 In task_download, a download that exceeds this size is killed and we move on to avoid infinite disk fill-up attacks.
 
-Sporadically, the tracker does not give a list of peers when asking for a file and instead says that no peers are available. To alleviate this, a retry was added in the download section.
+Sporadically, the tracker does not give a list of peers (or peers are unavailable) when asking for a file and instead says that no peers are available. To alleviate this, a retry was added in the download section.
 
-Added TIMEOUT, which determines the maximum number of milliseconds between downloaded chunks in task_download before moving onto a different peer. Empirically, 500 ms is still enough that the slow peer will successfully upload to the client. This is mainly to prevent evil peers that intentionally upload extremely slowly.
+Added TIMEOUT, which determines the maximum number of milliseconds between downloaded chunks in task_download before moving onto a different peer. Empirically, 1s is still enough that the slow peer will successfully upload to the client. This is mainly to prevent evil peers that intentionally upload extremely slowly.
 
 # EXERCISE 3: Describe the attacks you implemented for "evil mode".  Why
 #    are they attacks?  (~3-10 sentences each)

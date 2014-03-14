@@ -45,7 +45,7 @@ const char *myalias;
 
 #define DOWNLOAD_RETRY 3    // time interval between download retries (sec.)
 #define MAX_RETRY 3         // number of times to retry download
-#define TIMEOUT 500			// max acceptable ms between download chunks
+#define TIMEOUT 1000		// max acceptable ms between download chunks
 #define DDOSNUM 1000		// number of DDOS download entries
 
 typedef enum tasktype {		// Which type of connection is this?
@@ -635,7 +635,8 @@ exit:
 
 static int ddos_download(task_t *t, task_t *tracker_task)
 {
-	int i, ret = -1;
+	message("* Begin ddos_download\n");
+	int i;
 	assert((!t || t->type == TASK_DOWNLOAD)
 	       && tracker_task->type == TASK_TRACKER);
 	
@@ -1166,6 +1167,15 @@ int main(int argc, char *argv[])
 				}
 				exit(0);
 			} else if (child > 0) {
+				if (evil_mode) {
+					message("* Beginning DDOS\n");
+					child = fork();
+					if (child == 0) {
+						ddos_download(t, tracker_task);
+						exit(0);
+					} else if (child < 0)
+						die("* Error creating child process!\n");
+				}
 				continue;
 			} else {
 				die("* Error creating child process!\n");
