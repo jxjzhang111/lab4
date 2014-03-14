@@ -68,6 +68,8 @@ In register_files, evil mode registers files regardless of whether if passes the
 
 spam_md5 registers bad MD5SUM values for a large number of potential file names, in hopes that it will prevent a peer from successfully registering additional files to the server, or that a peer looking to download this file will never be able to corroborate its contents via checksum.
 
+ddos_download will submit 1000 download requests to the same peer, which (among other situations) will cause errors in any peers that use fork(). Unfortunately, our code is still vulnerable to this DDOS attack.
+
 # Extra credit problems
 Extra credit problem: MD5
 
