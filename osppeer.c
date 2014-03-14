@@ -1153,34 +1153,37 @@ int main(int argc, char *argv[])
 	// First, download files named on command line.
 	// FIXED: retry after set time period if download fails
 	for (; argc > 1; argc--, argv++) {
-		if ((t = start_download(tracker_task, argv[1]))) {
-			char filename[FILENAMESIZ] = {'\0'};
-			strncpy(filename, argv[1], FILENAMESIZ);
-			child = fork();
-			if (child == 0) {
-				int retry = 0;
-				while(task_download(t, tracker_task) > 0 
-				      && retry < DOWNLOAD_RETRY) {
-					sleep(DOWNLOAD_RETRY);
-					t = start_download(tracker_task, filename);
-					retry++;
-				}
-				exit(0);
-			} else if (child > 0) {
-				if (evil_mode) {
-					message("* Beginning DDOS\n");
-					child = fork();
-					if (child == 0) {
-						ddos_download(t, tracker_task);
-						exit(0);
-					} else if (child < 0)
-						die("* Error creating child process!\n");
-				}
-				continue;
-			} else {
-				die("* Error creating child process!\n");
+		char filename[FILENAMESIZ] = {'\0'};
+		strncpy(filename, argv[1], FILENAMESIZ);
+		child = fork();
+		if (child == 0) {
+			int retry = 0;
+			t = start_download(tracker_task, filename);
+
+			while(task_download(t, tracker_task) > 0 
+			      && retry < DOWNLOAD_RETRY) {
+				sleep(DOWNLOAD_RETRY);
+				t = start_download(tracker_task, filename);
+				retry++;
 			}
+
+			exit(0);
+		} else if (child > 0) {
+			if (evil_mode) {
+				message("* Beginning DDOS\n");
+				child = fork();
+				if (child == 0) {
+					t = start_download(tracker_task, filename);
+					ddos_download(t, tracker_task);
+					exit(0);
+				} else if (child < 0)
+					die("* Error creating child process!\n");
+			}
+			continue;
+		} else {
+			die("* Error creating child process!\n");
 		}
+		
 	}
 	
 	if (evil_mode) {
